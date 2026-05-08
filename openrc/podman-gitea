@@ -1,0 +1,48 @@
+#!/sbin/openrc-run
+
+name="Podman Gitea Pod"
+description="Run a Gitea podman pod as a rootless service user"
+
+: ${PODMAN_USER:=git}
+: ${PODMAN_XDG_RUNTIME_DIR:=/run/podman-gitea}
+: ${POD_NAME:=gitea}
+
+extra_started_commands="status"
+
+depend() {
+  need localmount net
+  after firewall
+}
+
+as_podman_user() {
+  su -s /bin/bash -c "XDG_RUNTIME_DIR='${PODMAN_XDG_RUNTIME_DIR}' $*" "${PODMAN_USER}"
+}
+
+start() {
+  ebegin "Starting pod '${POD_NAME}' as ${PODMAN_USER}"
+  install -d -m 0700 -o "${PODMAN_USER}" -g "${PODMAN_USER}" "${PODMAN_XDG_RUNTIME_DIR}"
+  as_podman_user "podman pod exists '${POD_NAME}'" || {
+    eerror "Pod '${POD_NAME}' does not exist. Run scripts/restore_gitea_pod.sh first."
+    eend 1
+    return 1
+  }
+  as_podman_user "podman pod start '${POD_NAME}' >/dev/null 2>&1 || true"
+  as_podman_user "podman pod ps --filter name='${POD_NAME}'"
+  eend $?
+}
+
+stop() {
+  ebegin "Stopping pod '${POD_NAME}' as ${PODMAN_USER}"
+  as_podman_user "podman pod exists '${POD_NAME}'" || {
+    eend 0
+    return 0
+  }
+  as_podman_user "podman pod stop -t 30 '${POD_NAME}' >/dev/null 2>&1 || true"
+  eend $?
+}
+
+status() {
+  as_podman_user "podman pod ps --filter name='${POD_NAME}'"
+  as_podman_user "podman ps --pod --filter pod='${POD_NAME}'"
+}
+

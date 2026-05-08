@@ -1,0 +1,13 @@
+[Unit]
+Description=Gitea Podman Pod
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=podman pod start __POD_NAME__
+ExecStop=podman pod stop -t 30 __POD_NAME__
+
+[Install]
+WantedBy=default.target
+

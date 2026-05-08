@@ -1,0 +1,14 @@
+[Unit]
+Description=Gitea Podman Pod
+Wants=network-online.target
+After=network-online.target local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=__INSTALL_BIN__ -d -m 0700 -o __PODMAN_USER__ -g __PODMAN_GROUP__ __PODMAN_XDG_RUNTIME_DIR__
+ExecStart=__SU_BIN__ -s /bin/bash -c 'XDG_RUNTIME_DIR="__PODMAN_XDG_RUNTIME_DIR__" podman pod start "__POD_NAME__"' __PODMAN_USER__
+ExecStop=__SU_BIN__ -s /bin/bash -c 'XDG_RUNTIME_DIR="__PODMAN_XDG_RUNTIME_DIR__" podman pod stop -t 30 "__POD_NAME__"' __PODMAN_USER__
+
+[Install]
+WantedBy=multi-user.target

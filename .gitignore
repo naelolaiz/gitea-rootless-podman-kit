@@ -1,0 +1,27 @@
+# Machine-local configuration. Copy config.example.env to config.env locally.
+config.env
+.agents/
+.codex/
+*.swp
+.*.swp
+
+# age private identities must never be committed to a public repo.
+keys/*.agekey
+keys/AGE-SECRET-KEY-*
+*.agekey
+AGE-SECRET-KEY-*
+
+# Plaintext Gitea secrets/data.
+*.ini
+*.db
+*.sqlite
+*.sqlite3
+*.tar
+*.tar.gz
+*.tar.zst
+
+# Public template repo: do not track backups by default.
+# Private forks can force-add encrypted backups intentionally, for example:
+# git add -f backups/*.tar.zst.age backups/*.tar.zst.age.sha256
+backups/*
+!backups/.gitkeep
