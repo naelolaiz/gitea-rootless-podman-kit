@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck systemd
+
+      - name: ShellCheck bash scripts
+        run: |
+          set -euo pipefail
+          shellcheck --external-sources --severity=style scripts/*.sh
+
+      - name: ShellCheck OpenRC init script
+        run: |
+          set -euo pipefail
+          # OpenRC scripts use #!/sbin/openrc-run; tell shellcheck to treat
+          # them as POSIX sh. SC2034 (unused vars name/description/etc.) and
+          # SC2223 (default-assignment globbing) are OpenRC framework
+          # conventions, not real findings.
+          shellcheck --shell=sh --severity=style \
+            --exclude=SC2034,SC2223 \
+            openrc/podman-gitea
+
+      - name: Verify systemd unit template (system)
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/units
+          # Substitute placeholders with values that always exist on the
+          # runner. This is a pure syntax / directive check, not a runtime
+          # validation of the deployed unit.
+          sed \
+            -e 's|__INSTALL_BIN__|/usr/bin/true|g' \
+            -e 's|__SU_BIN__|/usr/bin/true|g' \
+            -e 's|__PODMAN_USER__|root|g' \
+            -e 's|__PODMAN_GROUP__|root|g' \
+            -e 's|__PODMAN_XDG_RUNTIME_DIR__|/run/podman-gitea|g' \
+            -e 's|__POD_NAME__|gitea|g' \
+            systemd/podman-gitea.service.template \
+            > .ci/units/podman-gitea.service
+          systemd-analyze verify .ci/units/podman-gitea.service
+
+      - name: Verify systemd unit template (user)
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/units
+          sed -e 's|__POD_NAME__|gitea|g' \
+            systemd/podman-gitea.user.service.template \
+            > .ci/units/podman-gitea.user.service
+          # The user unit references bare `podman`; systemd-analyze resolves
+          # it against $PATH. We are doing a syntax check, not a runtime
+          # check, so stub a no-op binary to satisfy the resolver.
+          sudo ln -sf /usr/bin/true /usr/local/bin/podman
+          systemd-analyze verify .ci/units/podman-gitea.user.service
+
+      - name: Repo hygiene (no committed secrets or machine-local config)
+        run: |
+          set -euo pipefail
+
+          # config.env is per-machine and must never be tracked.
+          if git ls-files --error-unmatch config.env >/dev/null 2>&1; then
+            echo "::error file=config.env::config.env is tracked in git; it must remain machine-local." >&2
+            exit 1
+          fi
+
+          # Age private identities must never land in this public repo.
+          tracked_secrets="$(git ls-files \
+            | grep -E '(\.agekey$|/AGE-SECRET-KEY-|^AGE-SECRET-KEY-)' \
+            || true)"
+          if [ -n "${tracked_secrets}" ]; then
+            echo "::error::age private identity is tracked in git:" >&2
+            printf '%s\n' "${tracked_secrets}" >&2
+            exit 1
+          fi
+
+          # config.example.env must never grow a real-looking age secret.
+          if grep -E '^[^#]*AGE-SECRET-KEY-' config.example.env; then
+            echo "::error file=config.example.env::config.example.env appears to contain an age private key." >&2
+            exit 1
+          fi
+
+          # Plaintext backup artefacts must never be tracked, regardless of
+          # what .gitignore happens to look like.
+          tracked_archives="$(git ls-files \
+            | grep -E '\.(tar|tar\.gz|tar\.zst|sqlite3?|db|ini)$' \
+            || true)"
+          if [ -n "${tracked_archives}" ]; then
+            echo "::error::plaintext data/archive files are tracked in git:" >&2
+            printf '%s\n' "${tracked_archives}" >&2
+            exit 1
+          fi
