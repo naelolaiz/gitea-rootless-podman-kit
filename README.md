@@ -180,6 +180,8 @@ Related backup scripts:
 - `scripts/copy_latest_backup_to_bundle.sh`: staging helper. It copies the newest encrypted archive from `BACKUP_ROOT` into local `backups/`.
 - `scripts/create_and_stage_backup.sh`: normal manual entrypoint. It runs both scripts above.
 
+When `copy_latest_backup_to_bundle.sh` is run as root, staged files under `backups/` are chowned to the owner/group of this bundle directory by default. Override with `STAGED_BACKUP_OWNER`, `STAGED_BACKUP_GROUP`, or `STAGED_BACKUP_MODE` if needed.
+
 ### `scripts/install_boot_service.sh`
 
 Purpose: install and start boot service for OpenRC or systemd.
@@ -315,6 +317,7 @@ BACKUP_CRON_SCHEDULE="17 3 * * *"
 BACKUP_CRON_FILE="/etc/cron.d/gitea-podman-backup"
 BACKUP_CRON_LOG="/var/log/gitea-podman-backup.log"
 SCHEDULED_BACKUP_STAGE_TO_BUNDLE="1"
+SCHEDULED_BACKUP_STAGED_MODE="0600"
 ```
 
 The generated cron command runs:

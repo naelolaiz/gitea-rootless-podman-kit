@@ -21,7 +21,7 @@ AGE-SECRET-KEY-*
 *.tar.zst
 
 # Public template repo: do not track backups by default.
-# Private forks can force-add encrypted backups intentionally, for example:
+# Private storage repos can force-add encrypted backups intentionally, for example:
 # git add -f backups/*.tar.zst.age backups/*.tar.zst.age.sha256
 backups/*
 !backups/.gitkeep

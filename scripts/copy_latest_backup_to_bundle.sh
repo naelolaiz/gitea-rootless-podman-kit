@@ -16,6 +16,13 @@ fi
 : "${STAGED_BACKUP_GROUP:=}"
 : "${STAGED_BACKUP_MODE:=0600}"
 
+if [[ -z "${STAGED_BACKUP_OWNER}" ]]; then
+  STAGED_BACKUP_OWNER="$(stat -c '%u' "${BUNDLE_DIR}")"
+fi
+if [[ -z "${STAGED_BACKUP_GROUP}" ]]; then
+  STAGED_BACKUP_GROUP="$(stat -c '%g' "${BUNDLE_DIR}")"
+fi
+
 latest="$(
   find "${BACKUP_ROOT}" -maxdepth 1 -type f -name 'gitea-pod-*.tar.zst.age' -printf '%T@ %p\n' \
     | sort -nr \
@@ -28,6 +35,7 @@ if [[ -z "${latest}" ]]; then
 fi
 
 install -d -m 0755 "${BUNDLE_DIR}/backups"
+chown "${STAGED_BACKUP_OWNER}:${STAGED_BACKUP_GROUP}" "${BUNDLE_DIR}/backups" 2>/dev/null || true
 
 dest="${BUNDLE_DIR}/backups/$(basename "${latest}")"
 cp "${latest}" "${dest}"
@@ -39,16 +47,10 @@ if [[ -f "${latest}.sha256" ]]; then
   chmod "${STAGED_BACKUP_MODE}" "${sha_dest}"
 fi
 
-if [[ -n "${STAGED_BACKUP_OWNER}" ]]; then
-  chown_targets=("${dest}")
-  if [[ -n "${sha_dest:-}" ]]; then
-    chown_targets+=("${sha_dest}")
-  fi
-  if [[ -n "${STAGED_BACKUP_GROUP}" ]]; then
-    chown "${STAGED_BACKUP_OWNER}:${STAGED_BACKUP_GROUP}" "${chown_targets[@]}" 2>/dev/null || true
-  else
-    chown "${STAGED_BACKUP_OWNER}" "${chown_targets[@]}" 2>/dev/null || true
-  fi
+chown_targets=("${dest}")
+if [[ -n "${sha_dest:-}" ]]; then
+  chown_targets+=("${sha_dest}")
 fi
+chown "${STAGED_BACKUP_OWNER}:${STAGED_BACKUP_GROUP}" "${chown_targets[@]}" 2>/dev/null || true
 
 printf 'Copied %s\n' "${latest}"
