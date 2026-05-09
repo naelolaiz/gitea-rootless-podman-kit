@@ -302,6 +302,50 @@ systemctl status podman-gitea.service
 curl -I http://127.0.0.1:3000/
 ```
 
+## Git SSH Remotes
+
+The container publishes Gitea SSH on `SSH_HOST_PORT`, which defaults to `2222`.
+
+Do not use this remote form unless your host SSH service is intentionally wired into Gitea:
+
+```text
+localhost:owner/repo.git
+```
+
+That short SSH syntax uses port `22` by default. On a host that also has a `git` user, it can bypass the Podman Gitea SSH service and execute stale repository hooks directly.
+
+Use the explicit Gitea SSH port:
+
+```bash
+git remote set-url origin ssh://git@localhost:2222/owner/repo.git
+ssh -p 2222 -T git@localhost
+git push
+```
+
+Or create an SSH alias:
+
+```sshconfig
+Host gitea-local
+  HostName localhost
+  User git
+  Port 2222
+```
+
+Then use:
+
+```bash
+git remote set-url origin gitea-local:owner/repo.git
+```
+
+After restoring or moving repositories, hooks should be regenerated inside the running container. `scripts/restore_gitea_pod.sh` does this automatically. Manual equivalent:
+
+```bash
+su -s /bin/bash -c 'XDG_RUNTIME_DIR=/run/podman-gitea podman exec gitea-server gitea --config /etc/gitea/app.ini --work-path /var/lib/gitea admin regenerate hooks' git
+su -s /bin/bash -c 'XDG_RUNTIME_DIR=/run/podman-gitea podman exec gitea-server gitea --config /etc/gitea/app.ini --work-path /var/lib/gitea admin regenerate keys' git
+```
+
+If your `config.env` uses a different `PODMAN_XDG_RUNTIME_DIR`, use that value instead of `/run/podman-gitea`.
+
 ## Scheduled Local Backups
 
 Install a local cron entry:
