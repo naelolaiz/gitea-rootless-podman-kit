@@ -232,7 +232,7 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
-            if curl -fsS "http://${HTTP_BIND}:${HTTP_HOST_PORT}/" >/dev/null; then
+            if curl -fs "http://${HTTP_BIND}:${HTTP_HOST_PORT}/" >/dev/null 2>&1; then
               echo "Gitea is up after ${i}s"
               exit 0
             fi
@@ -271,10 +271,12 @@ jobs:
           # Wait for Gitea to come back up authenticated. /api/v1/version
           # only requires a valid login, so a 200 here proves the install
           # POST landed: app.ini was rewritten, the DB was migrated, and
-          # the admin user was created.
+          # the admin user was created. We use -s (no -S) plus 2>/dev/null
+          # so the inevitable 404s / connection resets while Gitea is
+          # restarting do not pollute the log.
           for i in $(seq 1 60); do
-            if curl -fsS -u "${CI_ADMIN_USER}:${CI_ADMIN_PASS}" \
-                 "${base}/api/v1/version" >/dev/null; then
+            if curl -fs -u "${CI_ADMIN_USER}:${CI_ADMIN_PASS}" \
+                 "${base}/api/v1/version" >/dev/null 2>&1; then
               echo "Installer completed and admin authenticates after ${i}s"
               exit 0
             fi
@@ -335,7 +337,7 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
-            if curl -fsS "http://${HTTP_BIND}:${HTTP_HOST_PORT}/" >/dev/null; then
+            if curl -fs "http://${HTTP_BIND}:${HTTP_HOST_PORT}/" >/dev/null 2>&1; then
               echo "Gitea is up after ${i}s"
               exit 0
             fi
