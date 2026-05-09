@@ -1,132 +1,76 @@
 # Gitea Rootless Podman Kit
 
-Portable scripts for running a small Gitea instance in a rootless Podman pod, with fresh install, encrypted backup, restore, cron automation, and OpenRC/systemd boot integration.
+Portable scripts to run a single-node Gitea instance in a rootless Podman pod, back it up as encrypted archives, and restore it on another machine.
 
-This kit targets a simple single-node deployment:
+## Scope
 
-- Gitea runs in the official rootless container image.
-- SQLite is the Gitea database.
-- Gitea data is a host bind mount.
-- `/etc/gitea` is a Podman named volume.
-- Backups are encrypted with `age` and compressed with `zstd`.
-- Boot startup is handled by OpenRC or systemd.
+This kit handles:
 
-It does not set up TLS, a reverse proxy, PostgreSQL/MySQL, external object storage, or a separate Gitea Actions runner service.
+- rootless Podman pod + Gitea container
+- SQLite (inside Gitea data)
+- host bind mount for Gitea data
+- Podman volume for `/etc/gitea`
+- encrypted backups (`age` + `zstd`)
+- restore from encrypted backups
+- OpenRC/systemd boot integration
 
-## Choose A Workflow
+This kit does not handle:
 
-Fresh install, no previous backup:
-
-```bash
-cd public_gitea_recovery_bundle
-cp config.example.env config.env
-# edit config.env
-./scripts/check_prereqs.sh
-./scripts/create_fresh_gitea_pod.sh
-./scripts/install_boot_service.sh
-```
-
-Then open `FRESH_ROOT_URL`, complete the Gitea web installer, and create the first backup.
-
-Restore from an existing encrypted backup:
-
-```bash
-cd public_gitea_recovery_bundle
-cp config.example.env config.env
-# edit config.env
-./scripts/check_prereqs.sh
-
-BACKUP_ARCHIVE=./backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age \
-AGE_IDENTITY=/path/to/private/gitea-backup.agekey \
-FORCE_RESTORE=1 \
-./scripts/restore_gitea_pod.sh
-
-./scripts/install_boot_service.sh
-```
-
-Create an encrypted backup of an existing kit-managed pod:
-
-```bash
-cd public_gitea_recovery_bundle
-./scripts/create_and_stage_backup.sh
-```
-
-Automate encrypted backups into a private fork:
-
-```bash
-cd public_gitea_recovery_bundle
-./scripts/cron_private_fork_backup.sh
-```
-
-## Important Rules
-
-Restore from backup requires both files:
-
-- encrypted backup archive: `backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age`
-- private age identity: for example `~/.config/gitea-backup/gitea-backup.agekey`
-
-Fresh install does not use a backup. It creates an empty Gitea data directory and starts the web installer.
-
-The private age identity is the critical secret. If it is lost, encrypted backups cannot be recovered.
-
-Backup archives are ignored by Git by default. The public repo is a reusable template; encrypted archives should stay local, off-site, or in an explicitly private storage location.
+- TLS/reverse proxy
+- PostgreSQL/MySQL
+- external object storage
+- provisioning a separate actions runner service
 
 ## Repository Layout
 
 ```text
 .
-├── backups/                 # local/private encrypted backups, ignored by default
+├── backups/                 # staged encrypted backups (gitignored by default)
 ├── keys/                    # public age recipient files
 ├── openrc/                  # OpenRC service template
-├── scripts/                 # install, backup, restore, cron helpers
+├── scripts/                 # operational scripts
 ├── systemd/                 # systemd service templates
-├── config.example.env       # template copied to config.env
-└── config.env               # local machine config, ignored by Git
+├── config.example.env       # copy to config.env
+└── config.env               # local machine config (gitignored)
 ```
 
-## Install Packages
+## Host Prerequisites
 
-Run package installation as root. Package names vary by distribution.
+Install packages as root. Names vary by distro.
 
-Gentoo package example:
-
-```bash
-emerge --ask app-containers/podman app-crypt/age app-arch/zstd net-misc/curl app-containers/slirp4netns sys-fs/fuse-overlayfs
-```
-
-Debian/Ubuntu package example:
+Debian/Ubuntu example:
 
 ```bash
 apt-get update
 apt-get install -y podman age zstd curl uidmap slirp4netns fuse-overlayfs
 ```
 
-Other distributions usually provide packages named `podman`, `age`, `zstd`, `curl`, `uidmap` or `shadow-utils`, `slirp4netns`, and `fuse-overlayfs`.
+Gentoo example:
 
-Git is only required for the private-fork cron workflow.
+```bash
+emerge --ask app-containers/podman app-crypt/age app-arch/zstd net-misc/curl app-containers/slirp4netns sys-fs/fuse-overlayfs
+```
 
-## Create The Service User
+Scripts also require: `bash`, `tar`, `su`.
 
-Create or choose the system account that will own rootless Podman state. The default used by this kit is `git`.
-
-Portable Linux example, run as root:
+Create the service account (default `git`) if needed:
 
 ```bash
 getent group git >/dev/null || groupadd -r git
 id git >/dev/null 2>&1 || useradd -r -m -d /var/lib/git -s /bin/bash -g git git
 ```
 
-The account is a service account, not a personal login account.
+## Initial Setup
 
-## Configure This Machine
-
-Create the local config file:
+From this bundle directory:
 
 ```bash
 cp config.example.env config.env
+# edit config.env
+./scripts/check_prereqs.sh
 ```
 
-Edit the important values:
+Important defaults in `config.env`:
 
 ```bash
 PODMAN_USER="git"
@@ -144,21 +88,9 @@ SSH_HOST_PORT="2222"
 FRESH_ROOT_URL="http://127.0.0.1:3000/"
 ```
 
-`config.env` is ignored by Git because it is machine-local. It may contain local paths, hostnames, ports, and private-fork settings.
+## Encryption Key Setup
 
-Relative paths inside `config.env`, such as `AGE_RECIPIENTS_FILE="./keys/gitea-backup.recipient"`, are resolved relative to this bundle directory by the scripts that need them.
-
-Check the host before creating or restoring the pod:
-
-```bash
-./scripts/check_prereqs.sh
-```
-
-If rootless Podman fails for `PODMAN_USER`, fix that first. Common causes are missing `newuidmap`/`newgidmap`, missing `/etc/subuid` or `/etc/subgid` entries, or distribution-specific Podman storage/networking setup.
-
-## Age Key Setup
-
-Generate the age identity as a normal user, not root:
+Generate age keys as a normal user (not root):
 
 ```bash
 mkdir -p ~/.config/gitea-backup
@@ -169,146 +101,50 @@ chmod 600 ~/.config/gitea-backup/gitea-backup.agekey
 chmod 644 ~/.config/gitea-backup/gitea-backup.recipient
 ```
 
-Keep this private and offline if possible:
-
-```text
-~/.config/gitea-backup/gitea-backup.agekey
-```
-
-The recipient is public and can be committed:
+Copy public recipient into this repo:
 
 ```bash
 cp ~/.config/gitea-backup/gitea-backup.recipient keys/gitea-backup.recipient
 ```
 
-`create_and_stage_backup.sh` uses `keys/gitea-backup.recipient` by default through `AGE_RECIPIENTS_FILE`.
+`./scripts/create_and_stage_backup.sh` uses `keys/gitea-backup.recipient` by default.
 
-## Fresh Install
+If the private key is lost, encrypted backups cannot be restored.
 
-Use this when there is no previous backup and you want a new empty Gitea instance.
+## Script Reference
 
-Run as root from this bundle directory:
+Every operation below follows the same format: script path + command to run.
+
+### `scripts/check_prereqs.sh`
+
+Purpose: preflight check for required commands, users/groups, rootless podman readiness, service-manager detection.
+
+Run:
+
+```bash
+./scripts/check_prereqs.sh
+```
+
+### `scripts/create_fresh_gitea_pod.sh`
+
+Purpose: create empty data dir, write starter `app.ini`, create pod/container for web installer.
+
+Run as root:
 
 ```bash
 ./scripts/create_fresh_gitea_pod.sh
 ```
 
-What it does:
+Key flags:
 
-- creates or validates `PODMAN_XDG_RUNTIME_DIR`
-- prepares an empty `HOST_DATA_DIR`
-- creates a starter `app.ini` with `INSTALL_LOCK=false`
-- creates or reuses the `CONFIG_VOLUME` Podman volume
-- creates the Podman pod and Gitea container
-- starts Gitea and checks HTTP
+- `FORCE_CREATE=1` replaces existing pod/data/volume.
+- `SKIP_PULL=1` skips image pull.
 
-If the pod, config volume, or data directory already exists, the script stops unless you explicitly set:
+### `scripts/restore_gitea_pod.sh`
 
-```bash
-FORCE_CREATE=1 ./scripts/create_fresh_gitea_pod.sh
-```
+Purpose: decrypt backup, restore data/config/runner, recreate pod/container, regenerate hooks/keys.
 
-After the script finishes, open `FRESH_ROOT_URL` and complete the Gitea web installer. Then create the first encrypted backup.
-
-## Create A Backup
-
-Run as root from this bundle directory:
-
-```bash
-./scripts/create_and_stage_backup.sh
-```
-
-What it does:
-
-- reads `config.env`
-- stops the pod if it is running
-- exports the `CONFIG_VOLUME` Podman volume
-- archives the Gitea data directory
-- archives the runner directory if it exists
-- compresses with `zstd`
-- encrypts with `age`
-- writes the backup to `BACKUP_ROOT`
-- copies the newest encrypted backup into local `backups/`
-- restarts the pod if it was running
-
-Compression defaults:
-
-```text
-zstd -T0 -12 --long=27
-```
-
-Override compression if needed:
-
-```bash
-ZSTD_LEVEL=19 ./scripts/create_and_stage_backup.sh
-```
-
-`backup_gitea_pod.sh` applies retention inside `BACKUP_ROOT` using `KEEP_DAYS`. Files copied into this repository's `backups/` directory are ignored by Git unless force-added.
-
-## What The Backup Contains
-
-The encrypted archive contains:
-
-- Gitea data directory, including SQLite DB, repositories, attachments, LFS, packages, sessions, indexers, and generated data
-- `config/`, exported from the Podman config volume, including `app.ini`
-- runner directory, if `HOST_RUNNER_DIR` exists
-- `manifest.txt` with backup metadata
-
-With the default paths, the SQLite database is stored as:
-
-```text
-gitea/data/gitea.db
-```
-
-With the default paths, repositories are stored as:
-
-```text
-gitea/data/gitea-repositories/
-```
-
-If `HOST_DATA_DIR` or `HOST_RUNNER_DIR` are customized, the top-level archive directory follows the source directory basename. The restore script detects the Gitea data directory by finding `*/data/gitea.db`.
-
-The backup script stops the pod before archiving so SQLite and repository data are captured consistently.
-
-## Inspect A Backup
-
-List archive contents:
-
-```bash
-age -d -i ~/.config/gitea-backup/gitea-backup.agekey backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age | zstd -d | tar -tf -
-```
-
-Check that the database is present:
-
-```bash
-age -d -i ~/.config/gitea-backup/gitea-backup.agekey backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age | zstd -d | tar -tf - | grep '/data/gitea.db$'
-```
-
-Check that repositories are present:
-
-```bash
-age -d -i ~/.config/gitea-backup/gitea-backup.agekey backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age | zstd -d | tar -tf - | grep '/data/gitea-repositories/'
-```
-
-Verify checksum:
-
-```bash
-sha256sum -c backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age.sha256
-```
-
-## Restore From Backup
-
-Use this when you already have an encrypted backup archive and the matching private age identity.
-
-Prepare local config:
-
-```bash
-cp config.example.env config.env
-# edit config.env
-./scripts/check_prereqs.sh
-```
-
-Restore as root:
+Run as root:
 
 ```bash
 BACKUP_ARCHIVE=./backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age \
@@ -317,65 +153,147 @@ FORCE_RESTORE=1 \
 ./scripts/restore_gitea_pod.sh
 ```
 
-What it does:
+Key flags:
 
-- decrypts the backup into temporary staging
-- restores the Gitea data directory
-- restores the runner directory if present
-- recreates the `CONFIG_VOLUME` Podman volume contents
-- recreates the Podman pod and Gitea container
-- checks that HTTP responds
-- regenerates Gitea hooks and keys
+- `FORCE_RESTORE=1` required when target pod/data already exists.
+- `SKIP_PULL=1` skips image pull.
 
-If the pod or data directory already exists, restore stops unless `FORCE_RESTORE=1` is set.
+### `scripts/create_and_stage_backup.sh`
 
-The restored `app.ini` comes from the backup. If the new machine uses a different hostname, public URL, SSH hostname, SMTP server, or reverse proxy layout, update the restored Gitea config after restore and restart the pod.
+Purpose: consistent backup (stop/start pod), encrypt archive, stage latest archive + checksum into local `backups/`.
 
-## Boot Service
+Run as root:
 
-Install boot startup as root:
+```bash
+./scripts/create_and_stage_backup.sh
+```
+
+Key flags:
+
+- `ZSTD_LEVEL=19` overrides compression level.
+- retention in `BACKUP_ROOT` uses `KEEP_DAYS`.
+
+### `scripts/install_boot_service.sh`
+
+Purpose: install and start boot service for OpenRC or systemd.
+
+Run as root:
 
 ```bash
 ./scripts/install_boot_service.sh
 ```
 
-The installer detects systemd or OpenRC. Override detection if needed:
+Key flags:
 
 ```bash
 SERVICE_MANAGER=openrc ./scripts/install_boot_service.sh
 SERVICE_MANAGER=systemd ./scripts/install_boot_service.sh
 ```
 
-Distribution and service manager are independent. Gentoo may use OpenRC or systemd; Debian and Ubuntu usually use systemd but can be customized.
+### `scripts/cron_private_fork_backup.sh`
 
-Manual OpenRC install, if the host uses OpenRC:
+Purpose: run backup, stage encrypted files in repo, commit, and optionally push to private remote.
+
+Run as root:
 
 ```bash
-install -m 0755 openrc/podman-gitea /etc/init.d/podman-gitea
-install -m 0644 openrc/podman-gitea.conf.d /etc/conf.d/podman-gitea
-rc-service podman-gitea start
-rc-update add podman-gitea default
+./scripts/cron_private_fork_backup.sh
 ```
 
-Manual systemd install is normally unnecessary because `scripts/install_boot_service.sh` renders `systemd/podman-gitea.service.template` with values from `config.env`.
-
-Check status on OpenRC:
+Key config in `config.env`:
 
 ```bash
+PRIVATE_BACKUP_GIT_USER="your-login-user"
+PRIVATE_BACKUP_GIT_GROUP="your-login-group"
+PRIVATE_BACKUP_PUSH="1"
+PRIVATE_BACKUP_GIT_REMOTE="origin"
+PRIVATE_BACKUP_GIT_BRANCH="main"
+PRIVATE_BACKUP_KEEP_REPO_BACKUPS="14"
+```
+
+## Workflows
+
+### Fresh install (no existing backup)
+
+Run in order:
+
+```bash
+./scripts/check_prereqs.sh
+sudo ./scripts/create_fresh_gitea_pod.sh
+sudo ./scripts/install_boot_service.sh
+```
+
+Then open `FRESH_ROOT_URL`, finish the web installer, and create the first backup:
+
+```bash
+sudo ./scripts/create_and_stage_backup.sh
+```
+
+### Restore from encrypted backup
+
+Required inputs:
+
+- encrypted archive (`.tar.zst.age`)
+- matching private age identity (`.agekey`)
+
+Run in order:
+
+```bash
+./scripts/check_prereqs.sh
+sudo BACKUP_ARCHIVE=./backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age \
+  AGE_IDENTITY=/path/to/private/gitea-backup.agekey \
+  FORCE_RESTORE=1 \
+  ./scripts/restore_gitea_pod.sh
+sudo ./scripts/install_boot_service.sh
+```
+
+If hostname/public URL/SMTP/proxy settings changed, update restored `app.ini` and restart pod.
+
+## Backup Inspection
+
+List archive contents:
+
+```bash
+age -d -i ~/.config/gitea-backup/gitea-backup.agekey backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age | zstd -d | tar -tf -
+```
+
+Check DB path exists:
+
+```bash
+age -d -i ~/.config/gitea-backup/gitea-backup.agekey backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age | zstd -d | tar -tf - | grep '/data/gitea.db$'
+```
+
+Verify checksum:
+
+```bash
+sha256sum -c backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age.sha256
+```
+
+## Service Status Checks
+
+```bash
+# OpenRC
 rc-service podman-gitea status
-curl -I http://127.0.0.1:3000/
-```
 
-Check status on systemd:
-
-```bash
+# systemd
 systemctl status podman-gitea.service
+
+# HTTP probe
 curl -I http://127.0.0.1:3000/
 ```
 
-## Public And Private Files
+## Private Cron Example
 
-Safe for the public template repo:
+```cron
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+17 3 * * * root cd /path/to/private/gitea-rootless-podman-kit && ./scripts/cron_private_fork_backup.sh >> /var/log/gitea-private-backup.log 2>&1
+```
+
+## Public vs Private Files
+
+Safe for public template repo:
 
 - `.gitignore`
 - `README.md`
@@ -389,82 +307,31 @@ Keep private:
 
 - `config.env`
 - `*.agekey`
-- `backups/*.tar.zst.age`, unless intentionally adding them to private storage
-- `backups/*.tar.zst.age.sha256`, unless intentionally adding them to private storage
+- encrypted backups unless intentionally stored in private infrastructure
 - raw `app.ini`
-- raw Gitea data directories
-- raw `.db` or `.sqlite` files
-- unencrypted `.tar`, `.tar.zst`, or repository directories
+- raw Gitea data directories / `.db` / `.sqlite`
+- unencrypted archives (`.tar`, `.tar.zst`, etc.)
 
-Encrypted backups are ignored by default:
+Backups are gitignored by default:
 
 ```text
 backups/*
 !backups/.gitkeep
 ```
 
-If you intentionally store encrypted backups in a private fork, force-add them:
+Force-add encrypted backups only when intentional in private storage:
 
 ```bash
 git add -f backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age backups/gitea-pod-YYYY-MM-DD_HHMMSS.tar.zst.age.sha256
 git commit -m "Add encrypted Gitea backup"
 ```
 
-## Automatic Private-Fork Backups
+## Restore Drill Checklist
 
-`scripts/cron_private_fork_backup.sh` is optional. It is for private clones only.
-
-What it does:
-
-- creates a consistent encrypted backup
-- stages the newest archive under `backups/`
-- force-adds the ignored encrypted archive and checksum
-- commits them to the private fork
-- optionally pushes to the private remote
-
-Configure `config.env`:
-
-```bash
-PRIVATE_BACKUP_GIT_USER="your-login-user"
-PRIVATE_BACKUP_GIT_GROUP="your-login-group"
-PRIVATE_BACKUP_PUSH="1"
-PRIVATE_BACKUP_GIT_REMOTE="origin"
-PRIVATE_BACKUP_GIT_BRANCH="main"
-PRIVATE_BACKUP_KEEP_REPO_BACKUPS="14"
-```
-
-Run once manually as root:
-
-```bash
-./scripts/cron_private_fork_backup.sh
-```
-
-Example `/etc/cron.d/gitea-private-backup`:
-
-```cron
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-17 3 * * * root cd /path/to/private/gitea-rootless-podman-kit && ./scripts/cron_private_fork_backup.sh >> /var/log/gitea-private-backup.log 2>&1
-```
-
-Cron runs as root because the backup needs to stop/start the pod and read service data. Git commits and pushes are performed as `PRIVATE_BACKUP_GIT_USER`, which defaults to the owner of the repository directory.
-
-Before enabling `PRIVATE_BACKUP_PUSH=1`, configure Git identity and push credentials for `PRIVATE_BACKUP_GIT_USER`:
-
-```bash
-su -s /bin/bash -c 'git config --global user.name "Gitea Backup" && git config --global user.email "gitea-backup@example.invalid"' your-login-user
-su -s /bin/bash -c 'cd /path/to/private/gitea-rootless-podman-kit && git push --dry-run origin main' your-login-user
-```
-
-GitHub normal Git has a hard file-size limit for large blobs. If encrypted backups are larger than that, use Git LFS, release assets, another private remote, or non-Git backup storage. `PRIVATE_BACKUP_KEEP_REPO_BACKUPS` only prunes files from the current working tree; it does not remove old backup blobs from Git history.
-
-## Restore Drill
-
-A backup should be treated as unproven until a restore has been tested. Periodically restore to another machine or alternate data path and confirm:
+Periodically restore to a separate machine/path and confirm:
 
 - login works
 - repositories are visible
 - clone works
 - push works
-- actions/runner setup is restored or intentionally re-registered
+- runner state is restored or intentionally re-registered
