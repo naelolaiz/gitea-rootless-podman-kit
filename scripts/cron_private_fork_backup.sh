@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-BUNDLE_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+BUNDLE_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 CONFIG_FILE="${CONFIG_FILE:-${BUNDLE_DIR}/config.env}"
 
 if [[ -f "${CONFIG_FILE}" ]]; then

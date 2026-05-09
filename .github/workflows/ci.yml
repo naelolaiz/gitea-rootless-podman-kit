@@ -1,0 +1,392 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck systemd
+
+      - name: ShellCheck bash scripts
+        run: |
+          set -euo pipefail
+          shellcheck --external-sources --severity=style scripts/*.sh
+
+      - name: ShellCheck OpenRC init script
+        run: |
+          set -euo pipefail
+          # OpenRC scripts use #!/sbin/openrc-run; tell shellcheck to treat
+          # them as POSIX sh. SC2034 (unused vars name/description/etc.) and
+          # SC2223 (default-assignment globbing) are OpenRC framework
+          # conventions, not real findings.
+          shellcheck --shell=sh --severity=style \
+            --exclude=SC2034,SC2223 \
+            openrc/podman-gitea
+
+      - name: Verify systemd unit template (system)
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/units
+          # Substitute placeholders with values that always exist on the
+          # runner. This is a pure syntax / directive check, not a runtime
+          # validation of the deployed unit.
+          sed \
+            -e 's|__INSTALL_BIN__|/usr/bin/true|g' \
+            -e 's|__SU_BIN__|/usr/bin/true|g' \
+            -e 's|__PODMAN_USER__|root|g' \
+            -e 's|__PODMAN_GROUP__|root|g' \
+            -e 's|__PODMAN_XDG_RUNTIME_DIR__|/run/podman-gitea|g' \
+            -e 's|__POD_NAME__|gitea|g' \
+            systemd/podman-gitea.service.template \
+            > .ci/units/podman-gitea.service
+          systemd-analyze verify .ci/units/podman-gitea.service
+
+      - name: Verify systemd unit template (user)
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/units
+          sed -e 's|__POD_NAME__|gitea|g' \
+            systemd/podman-gitea.user.service.template \
+            > .ci/units/podman-gitea.user.service
+          # The user unit references bare `podman`; systemd-analyze resolves
+          # it against $PATH. We are doing a syntax check, not a runtime
+          # check, so stub a no-op binary to satisfy the resolver.
+          sudo ln -sf /usr/bin/true /usr/local/bin/podman
+          systemd-analyze verify .ci/units/podman-gitea.user.service
+
+      - name: Repo hygiene (no committed secrets or machine-local config)
+        run: |
+          set -euo pipefail
+
+          # config.env is per-machine and must never be tracked.
+          if git ls-files --error-unmatch config.env >/dev/null 2>&1; then
+            echo "::error file=config.env::config.env is tracked in git; it must remain machine-local." >&2
+            exit 1
+          fi
+
+          # Age private identities must never land in this public repo.
+          tracked_secrets="$(git ls-files \
+            | grep -E '(\.agekey$|/AGE-SECRET-KEY-|^AGE-SECRET-KEY-)' \
+            || true)"
+          if [ -n "${tracked_secrets}" ]; then
+            echo "::error::age private identity is tracked in git:" >&2
+            printf '%s\n' "${tracked_secrets}" >&2
+            exit 1
+          fi
+
+          # config.example.env must never grow a real-looking age secret.
+          if grep -E '^[^#]*AGE-SECRET-KEY-' config.example.env; then
+            echo "::error file=config.example.env::config.example.env appears to contain an age private key." >&2
+            exit 1
+          fi
+
+          # Plaintext backup artefacts must never be tracked, regardless of
+          # what .gitignore happens to look like.
+          tracked_archives="$(git ls-files \
+            | grep -E '\.(tar|tar\.gz|tar\.zst|sqlite3?|db|ini)$' \
+            || true)"
+          if [ -n "${tracked_archives}" ]; then
+            echo "::error::plaintext data/archive files are tracked in git:" >&2
+            printf '%s\n' "${tracked_archives}" >&2
+            exit 1
+          fi
+
+  integration:
+    # Round-trip test: spin up Gitea in rootless Podman, complete the web
+    # installer, create a real repo via API, take an encrypted backup, tear
+    # everything down, restore from the archive, and verify the admin and
+    # repo survived. Gates PRs so broken state cannot land on main.
+    #
+    # The job runs inside a privileged Ubuntu container so all steps execute
+    # as root — no sudo. Privileged + the user-namespace setup below is what
+    # lets the inner rootless Podman run nested containers (Gitea + its
+    # config volume) successfully.
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    container:
+      image: docker.io/library/ubuntu:24.04
+      options: --privileged
+    defaults:
+      run:
+        # GitHub Actions defaults to `sh -e` inside containers, and on
+        # ubuntu:24.04 /bin/sh is dash, which lacks `set -o pipefail`.
+        shell: bash
+    env:
+      POD_NAME: gitea
+      CTR_NAME: gitea-server
+      PODMAN_USER: git
+      PODMAN_GROUP: git
+      PODMAN_XDG_RUNTIME_DIR: /run/podman-gitea
+      GITEA_BASE_DIR: /srv/gitea
+      HOST_DATA_DIR: /srv/gitea/var/lib/gitea
+      BACKUP_ROOT: /srv/gitea/backups
+      HTTP_BIND: 127.0.0.1
+      HTTP_HOST_PORT: "3000"
+      SSH_BIND: 127.0.0.1
+      SSH_HOST_PORT: "2222"
+      # Bootstrap admin used by the round-trip test. Credentials are
+      # ephemeral and only ever exist inside this runner's pod.
+      CI_ADMIN_USER: ciadmin
+      CI_ADMIN_PASS: CI-roundtrip-pass-12345
+      CI_ADMIN_EMAIL: ci-bot@users.noreply.github.com
+      CI_REPO_NAME: ci-roundtrip
+    steps:
+      - name: Install runtime dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git \
+            podman uidmap slirp4netns fuse-overlayfs catatonit \
+            age zstd tar curl
+
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Create rootless Podman service user
+        run: |
+          set -euo pipefail
+          if ! id "${PODMAN_USER}" >/dev/null 2>&1; then
+            useradd --create-home --shell /bin/bash "${PODMAN_USER}"
+          fi
+          # Ensure subuid / subgid ranges exist. useradd usually adds these
+          # for non-system users, but enforce it so a missing range cannot
+          # silently break rootless Podman.
+          if ! grep -q "^${PODMAN_USER}:" /etc/subuid; then
+            echo "${PODMAN_USER}:100000:65536" >> /etc/subuid
+          fi
+          if ! grep -q "^${PODMAN_USER}:" /etc/subgid; then
+            echo "${PODMAN_USER}:100000:65536" >> /etc/subgid
+          fi
+          install -d -m 0700 -o "${PODMAN_USER}" -g "${PODMAN_USER}" \
+            "${PODMAN_XDG_RUNTIME_DIR}"
+          # Warm up rootless Podman so the storage tree exists before
+          # create_fresh_gitea_pod.sh runs `podman pull` for the first time.
+          # runuser -l sets HOME and cwd from /etc/passwd, so the git user
+          # is not stuck with a cwd it cannot read.
+          runuser -l "${PODMAN_USER}" -c \
+            "XDG_RUNTIME_DIR='${PODMAN_XDG_RUNTIME_DIR}' podman info >/dev/null"
+
+      - name: Generate ephemeral age keypair
+        run: |
+          set -euo pipefail
+          mkdir -p keys
+          age-keygen -o keys/ci-private.agekey
+          # The keyfile starts with `# public key: age1...`; lift that out
+          # as the recipient file consumed via AGE_RECIPIENTS_FILE.
+          sed -n 's|^# public key: ||p' keys/ci-private.agekey > keys/ci.recipient
+          chmod 0600 keys/ci-private.agekey
+          test -s keys/ci.recipient
+
+      - name: Write CI config.env
+        run: |
+          set -euo pipefail
+          cat > config.env <<EOF
+          POD_NAME="${POD_NAME}"
+          CTR_NAME="${CTR_NAME}"
+          IMAGE="docker.gitea.com/gitea:1.26.1-rootless"
+          PODMAN_USER="${PODMAN_USER}"
+          PODMAN_GROUP="${PODMAN_GROUP}"
+          PODMAN_XDG_RUNTIME_DIR="${PODMAN_XDG_RUNTIME_DIR}"
+          GITEA_BASE_DIR="${GITEA_BASE_DIR}"
+          HOST_DATA_DIR="${HOST_DATA_DIR}"
+          BACKUP_ROOT="${BACKUP_ROOT}"
+          CONFIG_VOLUME="gitea-config"
+          HTTP_BIND="${HTTP_BIND}"
+          HTTP_HOST_PORT="${HTTP_HOST_PORT}"
+          SSH_BIND="${SSH_BIND}"
+          SSH_HOST_PORT="${SSH_HOST_PORT}"
+          FRESH_APP_NAME="GiteaCI"
+          FRESH_DOMAIN="localhost"
+          FRESH_ROOT_URL="http://${HTTP_BIND}:${HTTP_HOST_PORT}/"
+          CONTAINER_GIT_UID="1000"
+          CONTAINER_GIT_GID="1000"
+          AGE_RECIPIENTS_FILE="./keys/ci.recipient"
+          AGE_IDENTITY="./keys/ci-private.agekey"
+          ZSTD_LEVEL="3"
+          ZSTD_THREADS="0"
+          ZSTD_LONG="--long=27"
+          KEEP_DAYS="30"
+          EOF
+
+      - name: Create fresh Gitea pod
+        run: ./scripts/create_fresh_gitea_pod.sh
+
+      - name: Wait for Gitea HTTP
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -fsS "http://${HTTP_BIND}:${HTTP_HOST_PORT}/" >/dev/null; then
+              echo "Gitea is up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Gitea did not come up within 60s" >&2
+          exit 1
+
+      - name: Complete Gitea web installer
+        run: |
+          set -euo pipefail
+          base="http://${HTTP_BIND}:${HTTP_HOST_PORT}"
+          # In Gitea 1.26 the install routes are mounted at the root: GET /
+          # serves the install form and POST / submits it. There is no
+          # /install path (returns 404 from the install router's NotFound
+          # handler). The POST is not CSRF-protected because no user is
+          # logged in yet, so we can submit directly.
+          curl -fsSL -X POST "${base}/" \
+            --data-urlencode "db_type=sqlite3" \
+            --data-urlencode "db_path=/var/lib/gitea/data/gitea.db" \
+            --data-urlencode "app_name=GiteaCI" \
+            --data-urlencode "repo_root_path=/var/lib/gitea/data/gitea-repositories" \
+            --data-urlencode "lfs_root_path=/var/lib/gitea/data/lfs" \
+            --data-urlencode "run_user=git" \
+            --data-urlencode "domain=localhost" \
+            --data-urlencode "ssh_port=2222" \
+            --data-urlencode "http_port=3000" \
+            --data-urlencode "app_url=${base}/" \
+            --data-urlencode "log_root_path=/var/lib/gitea/log" \
+            --data-urlencode "admin_name=${CI_ADMIN_USER}" \
+            --data-urlencode "admin_passwd=${CI_ADMIN_PASS}" \
+            --data-urlencode "admin_confirm_passwd=${CI_ADMIN_PASS}" \
+            --data-urlencode "admin_email=${CI_ADMIN_EMAIL}" \
+            -o /dev/null
+
+          # Wait for Gitea to come back up authenticated. /api/v1/version
+          # only requires a valid login, so a 200 here proves the install
+          # POST landed: app.ini was rewritten, the DB was migrated, and
+          # the admin user was created.
+          for i in $(seq 1 60); do
+            if curl -fsS -u "${CI_ADMIN_USER}:${CI_ADMIN_PASS}" \
+                 "${base}/api/v1/version" >/dev/null; then
+              echo "Installer completed and admin authenticates after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Gitea did not accept admin auth within 60s after install" >&2
+          exit 1
+
+      - name: Create test repository via API
+        run: |
+          set -euo pipefail
+          base="http://${HTTP_BIND}:${HTTP_HOST_PORT}"
+          # auto_init=true creates an initial commit with a README.md, which
+          # gives us both a row in the DB and a real bare repo on disk.
+          curl -fsS -u "${CI_ADMIN_USER}:${CI_ADMIN_PASS}" \
+            -H 'Content-Type: application/json' \
+            -X POST "${base}/api/v1/user/repos" \
+            -d "{\"name\":\"${CI_REPO_NAME}\",\"auto_init\":true,\"description\":\"backup-restore round-trip\"}" \
+            >/dev/null
+          # Confirm the repo and its README exist before we backup.
+          curl -fsS -u "${CI_ADMIN_USER}:${CI_ADMIN_PASS}" \
+            "${base}/api/v1/repos/${CI_ADMIN_USER}/${CI_REPO_NAME}" \
+            | grep -q "\"name\":\"${CI_REPO_NAME}\""
+          curl -fsS -u "${CI_ADMIN_USER}:${CI_ADMIN_PASS}" \
+            "${base}/api/v1/repos/${CI_ADMIN_USER}/${CI_REPO_NAME}/contents/README.md" \
+            | grep -q '"name":"README.md"'
+
+      - name: Create encrypted backup
+        run: ./scripts/backup_gitea_pod.sh
+
+      - name: Tear down pod, volume, and data dir
+        run: |
+          set -euo pipefail
+          as_git() {
+            # runuser -l switches to git with HOME and cwd from passwd.
+            runuser -l "${PODMAN_USER}" -c \
+              "XDG_RUNTIME_DIR='${PODMAN_XDG_RUNTIME_DIR}' $*"
+          }
+          as_git "podman rm -f '${CTR_NAME}'" 2>/dev/null || true
+          as_git "podman pod rm -f '${POD_NAME}'" 2>/dev/null || true
+          as_git "podman volume rm -f gitea-config" 2>/dev/null || true
+          rm -rf "${HOST_DATA_DIR:?}"
+
+      - name: Restore from encrypted backup
+        run: |
+          set -euo pipefail
+          archive="$(find "${BACKUP_ROOT}" -maxdepth 1 -type f \
+            -name 'gitea-pod-*.tar.zst.age' | sort | tail -n 1)"
+          if [ -z "${archive}" ]; then
+            echo "no backup archive found in ${BACKUP_ROOT}" >&2
+            exit 1
+          fi
+          echo "Restoring from: ${archive}"
+          BACKUP_ARCHIVE="${archive}" FORCE_RESTORE=1 \
+            ./scripts/restore_gitea_pod.sh
+
+      - name: Wait for restored Gitea HTTP
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -fsS "http://${HTTP_BIND}:${HTTP_HOST_PORT}/" >/dev/null; then
+              echo "Gitea is up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Gitea did not come up after restore within 60s" >&2
+          exit 1
+
+      - name: Verify Gitea state survived restore
+        run: |
+          set -euo pipefail
+          base="http://${HTTP_BIND}:${HTTP_HOST_PORT}"
+
+          # Admin user must still authenticate. This proves the sqlite DB
+          # (users table, password hash) round-tripped correctly.
+          curl -fsS -u "${CI_ADMIN_USER}:${CI_ADMIN_PASS}" \
+            "${base}/api/v1/version" >/dev/null
+
+          # Repo metadata must still be present in the DB.
+          curl -fsS -u "${CI_ADMIN_USER}:${CI_ADMIN_PASS}" \
+            "${base}/api/v1/repos/${CI_ADMIN_USER}/${CI_REPO_NAME}" \
+            | grep -q "\"name\":\"${CI_REPO_NAME}\""
+
+          # README.md must still be reachable through the repo's bare git
+          # tree on disk. This is the path that lives in HOST_DATA_DIR
+          # gitea-repositories/, so a regression in the data-dir restore
+          # path would surface here.
+          curl -fsS -u "${CI_ADMIN_USER}:${CI_ADMIN_PASS}" \
+            "${base}/api/v1/repos/${CI_ADMIN_USER}/${CI_REPO_NAME}/contents/README.md" \
+            | grep -q '"name":"README.md"'
+
+          echo "Round-trip verified: admin auth, repo metadata, repo contents."
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          as_git() {
+            runuser -l "${PODMAN_USER}" -c \
+              "XDG_RUNTIME_DIR='${PODMAN_XDG_RUNTIME_DIR}' $*"
+          }
+          echo "=== id of ${PODMAN_USER} ==="
+          id "${PODMAN_USER}"
+          echo "=== rootless podman containers ==="
+          as_git "podman ps -a"
+          echo "=== rootless podman pods ==="
+          as_git "podman pod ps"
+          echo "=== gitea container logs (tail 200) ==="
+          as_git "podman logs '${CTR_NAME}'" 2>/dev/null | tail -200
+          echo "=== /srv/gitea tree (truncated) ==="
+          # shellcheck disable=SC2012  # ls is intentional for human-readable diagnostics
+          ls -laR /srv/gitea 2>/dev/null | head -200
+          echo "=== /etc/subuid / /etc/subgid ==="
+          cat /etc/subuid /etc/subgid
