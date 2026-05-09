@@ -12,6 +12,7 @@ fi
 
 : "${POD_NAME:=gitea}"
 : "${PODMAN_USER:=git}"
+: "${PODMAN_GROUP:=${PODMAN_USER}}"
 : "${PODMAN_XDG_RUNTIME_DIR:=/run/podman-gitea}"
 : "${IMAGE:=docker.gitea.com/gitea:1.26.1-rootless}"
 : "${GITEA_BASE_DIR:=/srv/gitea}"
@@ -40,6 +41,8 @@ fail() { printf '[%s] ERROR: %s\n' "$(date +'%F %T')" "$*" >&2; exit 1; }
 command -v age >/dev/null || fail "Missing age"
 command -v zstd >/dev/null || fail "Missing zstd"
 command -v tar >/dev/null || fail "Missing tar"
+id "${PODMAN_USER}" >/dev/null || fail "Missing system user: ${PODMAN_USER}"
+getent group "${PODMAN_GROUP}" >/dev/null || fail "Missing system group: ${PODMAN_GROUP}"
 
 if [[ -n "${AGE_RECIPIENT}" && -n "${AGE_RECIPIENTS_FILE}" ]]; then
   fail "Use AGE_RECIPIENT or AGE_RECIPIENTS_FILE, not both"
@@ -55,6 +58,8 @@ as_podman_user() {
   local cmd="$1"
   su -s /bin/bash -c "XDG_RUNTIME_DIR='${PODMAN_XDG_RUNTIME_DIR}' bash -lc \"${cmd}\"" "${PODMAN_USER}"
 }
+
+install -d -m 0700 -o "${PODMAN_USER}" -g "${PODMAN_GROUP}" "${PODMAN_XDG_RUNTIME_DIR}"
 
 as_podman_user "podman volume exists '${CONFIG_VOLUME}'" || fail "Missing config volume: ${CONFIG_VOLUME}"
 
