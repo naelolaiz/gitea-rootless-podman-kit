@@ -11,6 +11,7 @@ This kit handles:
 - host bind mount for Gitea data
 - Podman volume for `/etc/gitea`
 - encrypted backups (`age` + `zstd`)
+- scheduled local backups via cron
 - restore from encrypted backups
 - OpenRC/systemd boot integration
 
@@ -173,6 +174,12 @@ Key flags:
 - `ZSTD_LEVEL=19` overrides compression level.
 - retention in `BACKUP_ROOT` uses `KEEP_DAYS`.
 
+Related backup scripts:
+
+- `scripts/backup_gitea_pod.sh`: backup engine. It writes a new encrypted archive and checksum into `BACKUP_ROOT`.
+- `scripts/copy_latest_backup_to_bundle.sh`: staging helper. It copies the newest encrypted archive from `BACKUP_ROOT` into local `backups/`.
+- `scripts/create_and_stage_backup.sh`: normal manual entrypoint. It runs both scripts above.
+
 ### `scripts/install_boot_service.sh`
 
 Purpose: install and start boot service for OpenRC or systemd.
@@ -190,25 +197,36 @@ SERVICE_MANAGER=openrc ./scripts/install_boot_service.sh
 SERVICE_MANAGER=systemd ./scripts/install_boot_service.sh
 ```
 
-### `scripts/cron_private_fork_backup.sh`
+### `scripts/scheduled_backup.sh`
 
-Purpose: run backup, stage encrypted files in repo, commit, and optionally push to private remote.
+Purpose: cron-friendly backup entrypoint for local machines. By default it creates an encrypted backup and stages a local ignored copy under `backups/`.
 
 Run as root:
 
 ```bash
-./scripts/cron_private_fork_backup.sh
+./scripts/scheduled_backup.sh
 ```
 
-Key config in `config.env`:
+Optional Git-backed storage can be enabled, but it is off by default:
 
 ```bash
-PRIVATE_BACKUP_GIT_USER="your-login-user"
-PRIVATE_BACKUP_GIT_GROUP="your-login-group"
-PRIVATE_BACKUP_PUSH="1"
-PRIVATE_BACKUP_GIT_REMOTE="origin"
-PRIVATE_BACKUP_GIT_BRANCH="main"
-PRIVATE_BACKUP_KEEP_REPO_BACKUPS="14"
+SCHEDULED_BACKUP_GIT_ENABLE="1"
+SCHEDULED_BACKUP_GIT_USER="your-login-user"
+SCHEDULED_BACKUP_GIT_GROUP="your-login-group"
+SCHEDULED_BACKUP_GIT_PUSH="1"
+SCHEDULED_BACKUP_GIT_REMOTE="origin"
+SCHEDULED_BACKUP_GIT_BRANCH="main"
+SCHEDULED_BACKUP_GIT_KEEP_REPO_BACKUPS="14"
+```
+
+### `scripts/install_backup_cron.sh`
+
+Purpose: install `/etc/cron.d/gitea-podman-backup` for regular local backups.
+
+Run as root:
+
+```bash
+./scripts/install_backup_cron.sh
 ```
 
 ## Workflows
@@ -282,14 +300,32 @@ systemctl status podman-gitea.service
 curl -I http://127.0.0.1:3000/
 ```
 
-## Private Cron Example
+## Scheduled Local Backups
+
+Install a local cron entry:
+
+```bash
+sudo ./scripts/install_backup_cron.sh
+```
+
+Relevant `config.env` values:
 
 ```cron
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-17 3 * * * root cd /path/to/private/gitea-rootless-podman-kit && ./scripts/cron_private_fork_backup.sh >> /var/log/gitea-private-backup.log 2>&1
+BACKUP_CRON_SCHEDULE="17 3 * * *"
+BACKUP_CRON_FILE="/etc/cron.d/gitea-podman-backup"
+BACKUP_CRON_LOG="/var/log/gitea-podman-backup.log"
+SCHEDULED_BACKUP_STAGE_TO_BUNDLE="1"
 ```
+
+The generated cron command runs:
+
+```bash
+./scripts/scheduled_backup.sh
+```
+
+That creates encrypted backups in `BACKUP_ROOT` and, by default, stages a local ignored copy in `backups/`.
+
+If `SCHEDULED_BACKUP_GIT_ENABLE=1`, the same scheduled script can also commit and optionally push the encrypted backup to a private Git-backed storage remote. Normal Git hosting may reject large backup files; use Git LFS or another backup storage system for large archives.
 
 ## Public vs Private Files
 
